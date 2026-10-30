@@ -1,0 +1,175 @@
+
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.20;
+
+interface IERC20 {
+    function transfer(address to, uint256 amount) external returns (bool);
+    function transferFrom(address from, address to, uint256 amount) external returns (bool);
+    function balanceOf(address account) external view returns (uint256);
+}
+
+contract AIPerpetualLP {
+    IERC20 public immutable usdc;
+
+    address public owner;
+
+    uint256 public totalLiquidity;
+    uint256 public totalShares;
+
+    mapping(address => uint256) public shares;
+
+    struct Position {
+        uint256 margin;
+        uint256 entryPrice;
+        uint256 leverage;
+        bool isLong;
+        bool open;
+    }
+
+    mapping(address => Position) public positions;
+
+    event Deposit(address indexed user, uint256 amount);
+    event Withdraw(address indexed user, uint256 amount);
+    event PositionOpened(address indexed trader, bool isLong, uint256 margin);
+    event PositionClosed(address indexed trader, int256 pnl);
+
+    modifier onlyOwner() {
+        require(msg.sender == owner, "Not owner");
+        _;
+    }
+
+    constructor(address _usdc) {
+        usdc = IERC20(_usdc);
+        owner = msg.sender;
+    }
+
+    // LP deposits liquidity
+    function deposit(uint256 amount) external {
+        require(amount > 0, "Zero amount");
+
+        uint256 mintedShares;
+
+        if (totalShares == 0) {
+            mintedShares = amount;
+        } else {
+            mintedShares = amount * totalShares / totalLiquidity;
+        }
+
+        require(mintedShares > 0, "Zero shares");
+
+        usdc.transferFrom(msg.sender, address(this), amount);
+
+        shares[msg.sender] += mintedShares;
+        totalShares += mintedShares;
+        totalLiquidity += amount;
+
+        emit Deposit(msg.sender, amount);
+    }
+
+    // LP withdraws liquidity
+    function withdraw(uint256 shareAmount) external {
+        require(shares[msg.sender] >= shareAmount, "Insufficient shares");
+
+        uint256 amount = shareAmount * totalLiquidity / totalShares;
+
+        shares[msg.sender] -= shareAmount;
+        totalShares -= shareAmount;
+        totalLiquidity -= amount;
+
+        usdc.transfer(msg.sender, amount);
+
+        emit Withdraw(msg.sender, amount);
+    }
+
+    // Trader opens a perpetual position
+    function openPosition(
+        uint256 margin,
+        uint256 leverage,
+        uint256 entryPrice,
+        bool isLong
+    ) external {
+        require(!positions[msg.sender].open, "Position exists");
+        require(margin > 0, "Invalid margin");
+        require(leverage > 0 && leverage <= 10, "Max 10x");
+        require(entryPrice > 0, "Invalid price");
+
+        usdc.transferFrom(msg.sender, address(this), margin);
+
+        positions[msg.sender] = Position({
+            margin: margin,
+            entryPrice: entryPrice,
+            leverage: leverage,
+            isLong: isLong,
+            open: true
+        });
+
+        emit PositionOpened(msg.sender, isLong, margin);
+    }
+
+    // Simplified PnL calculation
+    function calculatePnL(
+        address trader,
+        uint256 currentPrice
+    ) public view returns (int256) {
+        Position memory p = positions[trader];
+
+        require(p.open, "No position");
+
+        int256 priceChange =
+            int256(currentPrice) - int256(p.entryPrice);
+
+        if (!p.isLong) {
+            priceChange = -priceChange;
+        }
+
+        return priceChange * int256(p.leverage) *
+            int256(p.margin) / int256(p.entryPrice);
+    }
+
+    // Close position using supplied price
+    function closePosition(uint256 currentPrice) external {
+        Position memory p = positions[msg.sender];
+
+        require(p.open, "No position");
+
+        int256 pnl = calculatePnL(msg.sender, currentPrice);
+
+        uint256 payout;
+
+        if (pnl >= 0) {
+            payout = p.margin + uint256(pnl);
+        } else {
+            uint256 loss = uint256(-pnl);
+            payout = loss >= p.margin ? 0 : p.margin - loss;
+        }
+
+        delete positions[msg.sender];
+
+        if (payout > 0) {
+            usdc.transfer(msg.sender, payout);
+        }
+
+        emit PositionClosed(msg.sender, pnl);
+    }
+
+    // AI agent can read these values off-chain
+    function getPoolData()
+        external
+        view
+        returns (
+            uint256 liquidity,
+            uint256 sharesSupply,
+            uint256 utilization
+        )
+    {
+        liquidity = totalLiquidity;
+        sharesSupply = totalShares;
+        utilization = 0;
+    }
+
+    // Owner updates contract ownership
+    function transferOwnership(address newOwner) external onlyOwner {
+        require(newOwner != address(0), "Invalid address");
+        owner = newOwner;
+    }
+}
